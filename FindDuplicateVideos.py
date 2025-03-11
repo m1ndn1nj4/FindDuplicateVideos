@@ -56,10 +56,12 @@ class VideoDuplicateFinder:
         }
 
         level = level.upper()
-        log_level = level_map.get(level, logging.INFO)
 
         if level not in level_map:
             self.logger.error(f"Invalid log level: {level}. Defaulting to INFO.")
+            log_level = logging.INFO
+        else:
+            log_level = level_map[level]
 
         if self.verbose:
             self.logger.log(log_level, message)
