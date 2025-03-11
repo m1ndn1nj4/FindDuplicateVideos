@@ -46,6 +46,7 @@ class ColoredLogger:
     """
 
     _instance = None
+    _log_level = logging.INFO
 
     def __new__(cls, level: int = logging.INFO) -> "ColoredLogger":
         """Creates a single instance of the logger with a specified log level.
@@ -59,24 +60,25 @@ class ColoredLogger:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialize(level)
+        else:
+            cls._instance.set_level(level)
         return cls._instance
 
     def _initialize(self, level: int) -> None:
-        """Initializes the logger with a console handler and colored formatter.
-
-        Args:
-            level (int): The logging level.
-        """
+        """Initializes the logger with a console handler and colored formatter."""
         self.logger = logging.getLogger("ColoredLogger")
+        self.set_level(level)
+        console_handler = logging.StreamHandler(sys.stdout)
+        formatter = ColoredFormatter("[%(levelname)s] %(message)s")
+        console_handler.setFormatter(formatter)
+        self.logger.addHandler(console_handler)
+
+    def set_level(self, level: int) -> None:
+        """Sets the logging level dynamically."""
+        self._log_level = level
         self.logger.setLevel(level)
 
-        if not self.logger.handlers:
-            console_handler = logging.StreamHandler(sys.stdout)
-            formatter = ColoredFormatter("[%(levelname)s] %(message)s")
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
-
-    def log(self, level: str, message: str) -> None:
+    def log(self, level: str, message: str) -> str:
         """Logs a message at the specified level.
 
         Args:
@@ -91,8 +93,13 @@ class ColoredLogger:
             "CRITICAL": logging.CRITICAL
         }
 
+        if level.upper() not in level_map:
+            self.logger.warning(f"Invalid log level: {level}. Defaulting to INFO.")
+
         log_level = level_map.get(level.upper(), logging.INFO)
+        formatted_message = f"[{level.upper()}] {message}"
         self.logger.log(log_level, message)
+        return formatted_message
 
     def debug(self, message: str) -> None:
         """Logs a debug message."""

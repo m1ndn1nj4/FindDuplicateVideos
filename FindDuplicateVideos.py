@@ -7,7 +7,7 @@ import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Union
 
 import xxhash
 from PIL import Image
@@ -47,8 +47,22 @@ class VideoDuplicateFinder:
 
     def log(self, level: str, message: str) -> None:
         """Logs a message with the specified log level."""
+        level_map = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "CRITICAL": logging.CRITICAL,
+        }
+
+        level = level.upper()
+        log_level = level_map.get(level, logging.INFO)
+
+        if level not in level_map:
+            self.logger.error(f"Invalid log level: {level}. Defaulting to INFO.")
+
         if self.verbose:
-            self.logger.log(level, message)
+            self.logger.log(log_level, message)
 
     def load_scan_state(self) -> Dict[str, Dict[str, Optional[str]]]:
         """Loads the scan state from a file.
@@ -62,9 +76,10 @@ class VideoDuplicateFinder:
         return {}
 
     def save_scan_state(self) -> None:
-        """Saves the scan state to a file."""
-        with open(self.scan_state_file, "w") as f:
-            json.dump(self.processed_files, f, indent=4)
+        """Safely saves the scan state to a file with a thread lock."""
+        with self.lock:
+            with open(self.scan_state_file, "w") as f:
+                json.dump(self.processed_files, f, indent=4)
 
     @staticmethod
     def get_video_duration(file_path: Union[str, Path]) -> int:
@@ -112,10 +127,10 @@ class VideoDuplicateFinder:
         ]
 
         try:
-            result = subprocess.run(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            result: Optional[str] = self.run_ffmpeg(command, temp_video)
 
-            if result.returncode != 0:
-                self.log("ERROR", f"FFmpeg error while normalizing {file_path}: {result.stderr}")
+            if result is None:
+                self.log("ERROR", f"FFmpeg error while normalizing {file_path}")
                 return None
 
             self.log("INFO", f"Normalized video created at {temp_video}")
@@ -150,10 +165,10 @@ class VideoDuplicateFinder:
         ]
 
         try:
-            result = subprocess.run(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            result: Optional[str] = self.run_ffmpeg(command, temp_audio)
 
-            if result.returncode != 0:
-                self.log("ERROR", f"FFmpeg error while extracting audio from {file_path}: {result.stderr}")
+            if result is None:
+                self.log("ERROR", f"FFmpeg error while extracting audio from {file_path}")
                 return None
 
             self.log("INFO", f"Audio extracted to {temp_audio}")
@@ -170,16 +185,8 @@ class VideoDuplicateFinder:
         return self.run_ffmpeg(command, image_path)
 
     def run_ffmpeg(self, command: List[str], output_file: str) -> Optional[str]:
-        """Executes an FFmpeg command and monitors for stalls.
-
-        Args:
-            command (List[str]): The FFmpeg command to execute.
-            output_file (str): The expected output file.
-
-        Returns:
-            Optional[str]: The output file path if successful, otherwise None.
-        """
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        """Executes an FFmpeg command and returns output file path if successful, else None."""
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         last_size: int = 0
         last_update_time: float = time.time()
 
@@ -196,7 +203,12 @@ class VideoDuplicateFinder:
                     os.remove(output_file) if os.path.exists(output_file) else None
                     return None
 
-        return output_file if os.path.exists(output_file) else None
+        if process.returncode == 0 and os.path.exists(output_file):
+            self.log("INFO", f"FFmpeg successfully created {output_file}")
+            return output_file
+        else:
+            self.log("ERROR", f"FFmpeg failed. Return code: {process.returncode}")
+            return None
 
     @staticmethod
     def get_hash(file_path: Union[str, Path]) -> str:
@@ -226,11 +238,11 @@ class VideoDuplicateFinder:
         """
         return str(phash(Image.open(image_path)))
 
-    def process_video(self, file_path: str) -> None:
+    def process_video(self, file_path: Union[Path, str]) -> None:
         """Processes a video file by normalizing it, extracting audio, and computing hashes.
 
         Args:
-            file_path (str): Path to the video file.
+            file_path Union[Path, str]: Path to the video file.
         """
         if str(file_path).lower() in self.processed_files:
             return
@@ -247,9 +259,9 @@ class VideoDuplicateFinder:
             video_hash: Optional[str] = self.get_hash(normalized_video)
 
             self.processed_files[str(file_path).lower()] = {
-                "audio_hash": audio_hash,
-                "image_hash": image_hash,
-                "video_hash": video_hash
+                "audio_hash": audio_hash if audio_hash else "",
+                "image_hash": image_hash if image_hash else "",
+                "video_hash": video_hash if video_hash else ""
             }
             self.save_scan_state()
 
@@ -271,8 +283,10 @@ class VideoDuplicateFinder:
     def scan_videos(self) -> None:
         """Scans and processes video files in the specified directory."""
         video_extensions: set = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv"}
-        video_files: List[Path] = [p for p in self.scan_dir.rglob("*")
-                                   if p.suffix.lower() in video_extensions and str(p).lower() not in self.processed_files]
+        video_files: List[Path] = [
+            p for p in self.scan_dir.rglob("*")
+            if p.suffix.lower() in video_extensions and str(p).lower() not in self.processed_files
+        ]
 
         batch_size: int = 500
         for i in range(0, len(video_files), batch_size):
@@ -281,7 +295,10 @@ class VideoDuplicateFinder:
                 futures = {executor.submit(self.process_video, file): file for file in batch}
                 with tqdm(total=len(batch)) as pbar:
                     for future in as_completed(futures):
-                        future.result()
+                        try:
+                            future.result()
+                        except Exception as e:
+                            self.log("ERROR", f"Error processing video: {e}")
                         pbar.update(1)
 
         self.log("INFO", "Scan completed.")
