@@ -9,11 +9,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import audioread
-from PIL import Image
-from imagehash import phash
 from tqdm import tqdm
 
 from src.logger import ColoredLogger
@@ -24,7 +22,7 @@ SCAN_STATE_FILE = "scan_state.json"
 class VideoDuplicateFinder:
     def __init__(
         self, scan_dir: str, scan_state: str, duplicates_file: str,
-        workers: Optional[int] = None, verbose: bool = False
+        workers: Optional[int] = None, verbose: bool = True
     ) -> None:
         """Initializes the VideoDuplicateFinder class.
 
@@ -269,17 +267,38 @@ class VideoDuplicateFinder:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    @staticmethod
-    def get_image_hash(image_path: Union[str, Path]) -> str:
-        """Computes the perceptual hash of an image.
+    def generate_perceptual_hash(self, video_path: str) -> Tuple[List[str], Optional[str]]:
+        """Generates perceptual hashes for a video file using FFmpeg.
 
         Args:
-            image_path (Union[str, Path]): Path to the image.
+            video_path (str): Path to the video file.
 
         Returns:
-            str: The computed image hash.
+            Tuple[List[str], Optional[str]]: A list of perceptual hashes and the generated hash file path.
         """
-        return str(phash(Image.open(image_path)))
+        hash_file = self.tmp_dir / f"{Path(video_path).stem}_phash.txt"
+
+        command: List[str] = [
+            "ffmpeg", "-i", str(video_path),
+            "-vf", "chromahold=0:0:0, scale=64:64, format=gray",
+            "-hash", "md5",
+            "-f", "hash", str(hash_file)
+        ]
+
+        result = self.run_ffmpeg(command, str(hash_file))
+
+        if result is None or not hash_file.exists():
+            self.log("ERROR", f"Failed to generate perceptual hash for {video_path}")
+            return [], None  # Return empty list and None for file path
+
+        try:
+            with open(hash_file, "r") as f:
+                hashes = [line.strip().split(" ")[-1] for line in f.readlines()]
+            self.log("INFO", f"Generated {len(hashes)} perceptual hashes for {video_path}")
+            return hashes, str(hash_file)
+        except Exception as e:
+            self.log("ERROR", f"Error reading perceptual hash file {hash_file}: {e}")
+            return [], None
 
     def process_video(self, file_path: Union[Path, str]) -> None:
         """Processes a video file by copying, normalizing, hashing, and extracting keyframes.
@@ -291,42 +310,41 @@ class VideoDuplicateFinder:
             return
 
         try:
-            # Step 1: Copy video to /tmp
+            # ✅ Step 1: Copy video to /tmp
             local_video_path = self.copy_file_to_local(file_path)
             if not local_video_path:
                 self.log("ERROR", f"Failed to copy video to /tmp: {file_path}")
                 return
 
-            # Step 2: Normalize the copied video
+            # ✅ Step 2: Normalize the copied video
             normalized_video = self.normalize_video(local_video_path)
             if not normalized_video:
                 return
 
-            # Step 3: Compute SHA256 hash for normalized video
+            # ✅ Step 3: Compute SHA256 hash for normalized video
             video_hash = self.get_sha256_hash(normalized_video)
 
-            # Step 4: Extract normalized audio from normalized video
+            # ✅ Step 4: Extract normalized audio from normalized video
             normalized_audio = self.extract_audio(normalized_video)
             if not normalized_audio:
                 return
 
-            # Step 5: Compute SHA256 audio fingerprint hash
+            # ✅ Step 5: Compute SHA256 audio fingerprint hash
             audio_hash = self.get_audio_hash(normalized_audio)
 
-            # Step 6: Generate perceptual hash for keyframes
-            image_file = self.extract_image(normalized_video)
-            image_hash = self.get_image_hash(image_file) if image_file else None
+            # ✅ Step 6: Generate perceptual hashes using FFmpeg
+            perceptual_hashes, hash_file = self.generate_perceptual_hash(normalized_video)
 
-            # Store hashes in scan state
+            # ✅ Store hashes in scan state
             self.processed_files[str(file_path).lower()] = {
                 "video_hash": video_hash if video_hash else "",
                 "audio_hash": audio_hash if audio_hash else "",
-                "image_hash": image_hash if image_hash else ""
+                "perceptual_hashes": perceptual_hashes if perceptual_hashes else []
             }
             self.save_scan_state()
 
-            # Cleanup temporary files
-            self.cleanup_tmp_files([local_video_path, normalized_video, normalized_audio, image_file])
+            # ✅ Cleanup temporary files (now includes `hash_file`)
+            self.cleanup_tmp_files([local_video_path, normalized_video, normalized_audio, hash_file])
 
         except Exception as e:
             self.log("ERROR", f"Error processing {file_path}: {e}")
