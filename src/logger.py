@@ -1,6 +1,6 @@
 import logging
 import sys
-from typing import Dict, Optional
+from typing import Dict
 
 
 class ColoredFormatter(logging.Formatter):
