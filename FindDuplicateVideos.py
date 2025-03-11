@@ -10,16 +10,23 @@ import os
 import random
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-import audioread
-import imagehash
-from PIL import Image
-from tqdm import tqdm
+try:
+    import audioread
+    import imagehash
+    from PIL import Image
+    from tqdm import tqdm
+except ImportError as e:
+    print(f"Error: Missing module {e.name}.")
+    print("Please install required dependencies using:")
+    print("    pip install -r requirements.txt")
+    sys.exit(1)
 
 from src.logger import ColoredLogger
 

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.poetry]
+name = "video-duplicate-finder"
+version = "0.1.0"
+description = "A tool to find duplicate video files using perceptual and audio hashing."
+authors = ["M1NDN1NJ4"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+tqdm = "*"
+audioread = "*"
+imagehash = "*"
+pillow = "*"
