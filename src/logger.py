@@ -1,6 +1,6 @@
 import logging
 import sys
-from typing import Dict
+from typing import Dict, Optional
 
 
 class ColoredFormatter(logging.Formatter):
@@ -47,21 +47,28 @@ class ColoredLogger:
 
     _instance = None
 
-    def __new__(cls) -> "ColoredLogger":
-        """Creates a single instance of the logger.
+    def __new__(cls, level: int = logging.INFO) -> "ColoredLogger":
+        """Creates a single instance of the logger with a specified log level.
+
+        Args:
+            level (int): The logging level (default: logging.INFO).
 
         Returns:
             ColoredLogger: The singleton instance of the logger.
         """
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._initialize()
+            cls._instance._initialize(level)
         return cls._instance
 
-    def _initialize(self) -> None:
-        """Initializes the logger with a console handler and colored formatter."""
+    def _initialize(self, level: int) -> None:
+        """Initializes the logger with a console handler and colored formatter.
+
+        Args:
+            level (int): The logging level.
+        """
         self.logger = logging.getLogger("ColoredLogger")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(level)
 
         if not self.logger.handlers:
             console_handler = logging.StreamHandler(sys.stdout)
@@ -69,42 +76,40 @@ class ColoredLogger:
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
 
-    def debug(self, message: str) -> None:
-        """Logs a debug message.
+    def log(self, level: str, message: str) -> None:
+        """Logs a message at the specified level.
 
         Args:
+            level (str): The log level as a string (e.g., "DEBUG", "INFO").
             message (str): The message to log.
         """
+        level_map = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "CRITICAL": logging.CRITICAL
+        }
+
+        log_level = level_map.get(level.upper(), logging.INFO)
+        self.logger.log(log_level, message)
+
+    def debug(self, message: str) -> None:
+        """Logs a debug message."""
         self.logger.debug(message)
 
     def info(self, message: str) -> None:
-        """Logs an info message.
-
-        Args:
-            message (str): The message to log.
-        """
+        """Logs an info message."""
         self.logger.info(message)
 
     def warning(self, message: str) -> None:
-        """Logs a warning message.
-
-        Args:
-            message (str): The message to log.
-        """
+        """Logs a warning message."""
         self.logger.warning(message)
 
     def error(self, message: str) -> None:
-        """Logs an error message.
-
-        Args:
-            message (str): The message to log.
-        """
+        """Logs an error message."""
         self.logger.error(message)
 
     def critical(self, message: str) -> None:
-        """Logs a critical message.
-
-        Args:
-            message (str): The message to log.
-        """
+        """Logs a critical message."""
         self.logger.critical(message)

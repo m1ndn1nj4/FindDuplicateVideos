@@ -1,10 +1,13 @@
 import json
 import multiprocessing
+import os
 import subprocess
 import threading
 import time
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Optional
 
 import xxhash
 from PIL import Image
@@ -17,7 +20,7 @@ SCAN_STATE_FILE = "scan_state.json"
 
 
 class VideoDuplicateFinder:
-    def __init__(self, scan_dir, scan_state, duplicates_file, workers=None):
+    def __init__(self, scan_dir, scan_state, duplicates_file, workers=None, verbose=False):
         self.scan_dir = Path(scan_dir)
         self.scan_state_file = Path(scan_state)
         self.duplicates_file = Path(duplicates_file)
@@ -27,11 +30,12 @@ class VideoDuplicateFinder:
         self.hash_index = {}
         self.lock = threading.Lock()
         self.verbose = True
+        self.logger = ColoredLogger(logging.DEBUG) if verbose else ColoredLogger(logging.INFO)
         self.workers = workers or max(2, multiprocessing.cpu_count() // 2)
 
-    def log(self, message):
+    def log(self, level, message):
         if self.verbose:
-            ColoredLogger.critical(f"[LOG] {message}")
+            self.logger.log(level, message)
 
     def load_scan_state(self):
         if self.scan_state_file.exists():
@@ -55,24 +59,84 @@ class VideoDuplicateFinder:
         except ValueError:
             return 60  # Default to 60 seconds if duration cannot be determined
 
-    def normalize_video(self, file_path):
-        temp_video = self.tmp_dir / file_path.name
-        video_duration = self.get_video_duration(file_path)
-        clip_length = max(video_duration // 2, video_duration)  # Half or full duration
+    def normalize_video(self, file_path: str) -> Optional[str]:
+        """Normalizes a video file by resizing it to 320x180 and encoding it in H.264.
+
+        Args:
+            file_path (str): The path to the video file to normalize.
+
+        Returns:
+            Optional[str]: The path to the normalized video file, or None if an error occurred.
+        """
+        if not os.path.exists(file_path):
+            self.log("WARNING", f"File does not exist: {file_path}")
+            return None
+
+        temp_video = os.path.join(self.tmp_dir, os.path.basename(file_path))
+
+        # Check if filename is too long (Unix systems usually have a 255-char limit)
+        if len(temp_video) > 255:
+            self.log("WARNING", f"Filename too long for {temp_video}. Generating temporary name.")
+            temp_video = os.path.join(self.tmp_dir, "temp_normalized.mp4")
 
         command = [
-            "ffmpeg", "-i", str(file_path), "-t", str(clip_length), "-vf", "scale=320:180",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "35",
-            "-b:v", "500k", "-maxrate", "500k", "-bufsize", "1000k",  # **Bitrate restriction**
-            "-c:a", "aac", "-b:a", "32k",  # **Lower audio quality**
-            "-movflags", "faststart", "-y", str(temp_video)
+            "ffmpeg", "-i", str(file_path), "-vf", "scale=320:180",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "35",
+            str(temp_video)
         ]
-        return self.run_ffmpeg(command, temp_video)
 
-    def extract_audio(self, video_path):
-        audio_path = self.tmp_dir / (video_path.stem + ".aac")
-        command = ["ffmpeg", "-i", str(video_path), "-vn", "-acodec", "copy", "-y", str(audio_path)]
-        return self.run_ffmpeg(command, audio_path)
+        try:
+            result = subprocess.run(
+                command, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+            )
+
+            if result.returncode != 0:
+                self.log("ERROR", f"FFmpeg error while normalizing {file_path}: {result.stderr}")
+                return None
+
+            self.log("INFO", f"Normalized video created at {temp_video}")
+            return temp_video
+
+        except Exception as e:
+            self.log("ERROR", f"Error normalizing video {file_path}: {e}")
+            return None
+
+    def extract_audio(self, file_path: str) -> Optional[str]:
+        """
+        Extract audio from a video file and save it as a low-quality WAV file.
+        Handles long output file names by generating a temporary name if necessary.
+        """
+        if not file_path or not os.path.isfile(file_path):
+            self.log("ERROR", f"File does not exist: {file_path}")
+            return None
+
+        temp_audio = os.path.join(self.tmp_dir, os.path.basename(file_path))
+
+        # Check if filename is too long (Unix systems usually have a 255-char limit)
+        if len(temp_audio) > 255:
+            self.log("WARNING", f"Filename too long for {temp_audio}. Generating temporary name.")
+            temp_audio = os.path.join(self.tmp_dir, "temp_normalized.wav")
+
+        command = [
+            "ffmpeg", "-i", str(file_path),
+            "-c:a", "pcm_s16le", "-ar", "8000", "-ac", "1", str(temp_audio)
+        ]
+
+        try:
+            result = subprocess.run(
+                command, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+            )
+
+            if result.returncode != 0:
+                self.log("ERROR", f"FFmpeg error while extracting audio from {file_path}: {result.stderr}")
+                return None
+
+            self.log("INFO", f"Audio extracted to {temp_audio}")
+            return temp_audio
+
+        except Exception as e:
+            self.log("ERROR", f"Error extracting audio from {file_path}: {e}")
+            return None
 
     def extract_image(self, video_path):
         image_path = self.tmp_dir / (video_path.stem + ".jpg")
@@ -92,7 +156,7 @@ class VideoDuplicateFinder:
                     last_size = current_size
                     last_update_time = time.time()
                 elif time.time() - last_update_time > 300:
-                    self.log(f"Process stalled, killing ffmpeg and removing {output_file}.")
+                    self.log("ERROR", f"Process stalled, killing ffmpeg and removing {output_file}.")
                     process.kill()
                     if output_file.exists():
                         output_file.unlink()  # **Delete the stalled file**
@@ -136,7 +200,7 @@ class VideoDuplicateFinder:
 
             self.cleanup_tmp_files([normalized_video, audio_file, image_file])
         except Exception as e:
-            self.log(f"Error processing {file_path}: {e}")
+            self.log("ERROR", f"Error processing {file_path}: {e}")
 
     @staticmethod
     def cleanup_tmp_files(files):
@@ -159,7 +223,7 @@ class VideoDuplicateFinder:
                         future.result()  # Ensure exceptions are raised if any occur
                         pbar.update(1)
 
-        self.log("Scan completed.")
+        self.log("INFO", "Scan completed.")
         self.save_scan_state()
 
 
