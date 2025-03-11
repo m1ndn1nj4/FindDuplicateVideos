@@ -1,17 +1,24 @@
+#!/usr/bin/env python3
+
+import base64
+import concurrent.futures
 import hashlib
 import json
 import logging
 import multiprocessing
 import os
+import random
 import shutil
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 
 import audioread
+import imagehash
+from PIL import Image
 from tqdm import tqdm
 
 from src.logger import ColoredLogger
@@ -84,6 +91,17 @@ class VideoDuplicateFinder:
                 json.dump(self.processed_files, f, indent=4)
 
     @staticmethod
+    def cleanup_tmp_files(files: List[Optional[str]]) -> None:
+        """Removes temporary files from the system.
+
+        Args:
+            files (List[Optional[str]]): List of file paths to delete.
+        """
+        for file in files:
+            if file and os.path.exists(file):
+                os.remove(file)
+
+    @staticmethod
     def get_video_duration(file_path: Union[str, Path]) -> int:
         """Gets the duration of a video file.
 
@@ -103,6 +121,22 @@ class VideoDuplicateFinder:
         except ValueError:
             return 60
 
+    @staticmethod
+    def generate_temp_filename(extension: str = "") -> str:
+        """
+        Generates a random Base64-encoded string as a temporary filename.
+        Optionally appends a file extension if provided.
+
+        Args:
+            extension (str): The file extension (e.g., '.mp4', '.wav').
+
+        Returns:
+            str: A unique filename with the given extension.
+        """
+        random_bytes = random.getrandbits(48).to_bytes(6, 'big')
+        base64_name = base64.urlsafe_b64encode(random_bytes).decode("utf-8").rstrip("=")
+        return f"{base64_name}{extension}"
+
     def copy_file_to_local(self, source_path: Union[str, Path]) -> Optional[Path]:
         """Copies a file to the local /tmp directory.
 
@@ -114,6 +148,10 @@ class VideoDuplicateFinder:
         """
         source_path = Path(source_path)
         destination_path = self.tmp_dir / source_path.name
+
+        if len(str(destination_path)) > 255:
+            self.log("WARNING", f"Filename too long for {destination_path}. Generating temporary name.")
+            destination_path = self.tmp_dir / self.generate_temp_filename(source_path.suffix)
 
         try:
             shutil.copy2(source_path, destination_path)
@@ -136,11 +174,11 @@ class VideoDuplicateFinder:
             self.log("WARNING", f"File does not exist: {file_path}")
             return None
 
-        temp_video: str = os.path.join(self.tmp_dir, os.path.basename(file_path))
+        temp_video = os.path.join(self.tmp_dir, os.path.basename(file_path))
 
         if len(temp_video) > 255:
             self.log("WARNING", f"Filename too long for {temp_video}. Generating temporary name.")
-            temp_video = os.path.join(self.tmp_dir, "temp_normalized.mp4")
+            temp_video = os.path.join(self.tmp_dir, self.generate_temp_filename(".mp4"))
 
         command: List[str] = [
             "ffmpeg", "-i", str(file_path), "-vf", "scale=320:180",
@@ -175,11 +213,11 @@ class VideoDuplicateFinder:
             self.log("ERROR", f"File does not exist: {file_path}")
             return None
 
-        temp_audio: str = os.path.join(self.tmp_dir, os.path.basename(file_path))
+        temp_audio = os.path.join(self.tmp_dir, os.path.basename(file_path))
 
         if len(temp_audio) > 255:
             self.log("WARNING", f"Filename too long for {temp_audio}. Generating temporary name.")
-            temp_audio = os.path.join(self.tmp_dir, "temp_normalized.wav")
+            temp_audio = os.path.join(self.tmp_dir, self.generate_temp_filename(".wav"))
 
         command: List[str] = [
             "ffmpeg", "-i", str(file_path),
@@ -218,12 +256,6 @@ class VideoDuplicateFinder:
         except Exception as e:
             self.log("ERROR", f"Failed to compute audio hash: {e}")
             return ""
-
-    def extract_image(self, video_path: str) -> Optional[str]:
-        """Extracts a single frame from a video and saves it as an image."""
-        image_path: str = os.path.join(self.tmp_dir, f"{Path(video_path).stem}.jpg")
-        command: List[str] = ["ffmpeg", "-i", video_path, "-frames:v", "1", "-y", image_path]
-        return self.run_ffmpeg(command, image_path)
 
     def run_ffmpeg(self, command: List[str], output_file: str) -> Optional[str]:
         """Executes an FFmpeg command and returns output file path if successful, else None."""
@@ -267,38 +299,78 @@ class VideoDuplicateFinder:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def generate_perceptual_hash(self, video_path: str) -> Tuple[List[str], Optional[str]]:
+    def generate_perceptual_hash(self, video_path: str) -> Optional[str]:
         """Generates perceptual hashes for a video file using FFmpeg.
 
         Args:
             video_path (str): Path to the video file.
 
         Returns:
-            Tuple[List[str], Optional[str]]: A list of perceptual hashes and the generated hash file path.
+            Optional[str]]: A list of perceptual hashes and the generated hash file path.
         """
-        hash_file = self.tmp_dir / f"{Path(video_path).stem}_phash.txt"
+        if not video_path or not os.path.isfile(video_path):
+            self.log("ERROR", f"File does not exist: {video_path}")
+            return None
+
+        keyframes_dir = f"{video_path}_frames"
+
+        if len(keyframes_dir) > 255:
+            self.log(
+                "WARNING",
+                f"Keyframes directory name too long for {keyframes_dir}. Generating temporary name."
+            )
+            keyframes_dir = os.path.join(os.path.dirname(video_path), self.generate_temp_filename())
 
         command: List[str] = [
-            "ffmpeg", "-i", str(video_path),
-            "-vf", "chromahold=0:0:0, scale=64:64, format=gray",
-            "-hash", "md5",
-            "-f", "hash", str(hash_file)
+            "ffmpeg", "-i", str(video_path), "-vf", "select=eq(pict_type\\,I)",
+            "-vsync", "vfr", "-q:v", "1", f"{keyframes_dir}/frame-%03d.jpg"
         ]
 
-        result = self.run_ffmpeg(command, str(hash_file))
-
-        if result is None or not hash_file.exists():
-            self.log("ERROR", f"Failed to generate perceptual hash for {video_path}")
-            return [], None  # Return empty list and None for file path
-
         try:
-            with open(hash_file, "r") as f:
-                hashes = [line.strip().split(" ")[-1] for line in f.readlines()]
-            self.log("INFO", f"Generated {len(hashes)} perceptual hashes for {video_path}")
-            return hashes, str(hash_file)
+            self.log("DEBUG", f"Generating perceptual hash for {video_path}")
+            os.makedirs(keyframes_dir, exist_ok=True)
+
+            result: Optional[str] = self.run_ffmpeg(command, f"{keyframes_dir}/frame-001.jpg")
+
+            if result is None or not os.listdir(keyframes_dir):
+                self.log("ERROR", f"Failed to generate perceptual hash for {video_path}")
+                return None  # Return empty list and None for file path
+
+            frame_files = os.listdir(keyframes_dir)
+            frame_hashes = []
+            for frame in frame_files:
+                try:
+                    frame_path = os.path.join(keyframes_dir, frame)
+                    frame_hash = str(imagehash.average_hash(Image.open(frame_path)))
+                    frame_hashes.append(frame_hash)
+                except Exception as e:
+                    self.log("WARNING", f"Error processing frame {frame}: {e}")
+
+            if not frame_hashes:
+                self.log("ERROR", f"No valid hashes generated for {video_path}.")
+                return None
+
+            combined_hash = hashlib.sha256("".join(frame_hashes).encode()).hexdigest()
+            self.log("INFO", f"Perceptual hash generated for {video_path}")
+            return combined_hash
+
         except Exception as e:
-            self.log("ERROR", f"Error reading perceptual hash file {hash_file}: {e}")
-            return [], None
+            self.log("ERROR", f"Unexpected error generating perceptual hash for {video_path}: {e}")
+            return None
+
+        finally:
+            # Ensure cleanup of keyframes directory
+            if os.path.exists(keyframes_dir):
+                for frame in os.listdir(keyframes_dir):
+                    try:
+                        os.remove(os.path.join(keyframes_dir, frame))
+                    except Exception as e:
+                        self.log("WARNING", f"Failed to remove frame {frame}: {e}")
+                try:
+                    os.rmdir(keyframes_dir)
+                    self.log("DEBUG", f"Temporary directory {keyframes_dir} removed.")
+                except Exception as e:
+                    self.log("WARNING", f"Failed to remove temporary directory {keyframes_dir}: {e}")
 
     def process_video(self, file_path: Union[Path, str]) -> None:
         """Processes a video file by copying, normalizing, hashing, and extracting keyframes.
@@ -333,32 +405,22 @@ class VideoDuplicateFinder:
             audio_hash = self.get_audio_hash(normalized_audio)
 
             # ✅ Step 6: Generate perceptual hashes using FFmpeg
-            perceptual_hashes, hash_file = self.generate_perceptual_hash(normalized_video)
+            perceptual_hash = self.generate_perceptual_hash(normalized_video)
 
             # ✅ Store hashes in scan state
-            self.processed_files[str(file_path).lower()] = {
-                "video_hash": video_hash if video_hash else "",
-                "audio_hash": audio_hash if audio_hash else "",
-                "perceptual_hashes": perceptual_hashes if perceptual_hashes else []
-            }
-            self.save_scan_state()
+            with self.lock:
+                self.processed_files[str(file_path).lower()] = {
+                    "video_hash": video_hash if video_hash else "",
+                    "audio_hash": audio_hash if audio_hash else "",
+                    "perceptual_hashes": perceptual_hash if perceptual_hash else ""
+                }
+                self.save_scan_state()
 
             # ✅ Cleanup temporary files (now includes `hash_file`)
-            self.cleanup_tmp_files([local_video_path, normalized_video, normalized_audio, hash_file])
+            self.cleanup_tmp_files([local_video_path, normalized_video, normalized_audio])
 
         except Exception as e:
             self.log("ERROR", f"Error processing {file_path}: {e}")
-
-    @staticmethod
-    def cleanup_tmp_files(files: List[Optional[str]]) -> None:
-        """Removes temporary files from the system.
-
-        Args:
-            files (List[Optional[str]]): List of file paths to delete.
-        """
-        for file in files:
-            if file and os.path.exists(file):
-                os.remove(file)
 
     def scan_videos(self) -> None:
         """Scans and processes video files in the specified directory."""
@@ -372,14 +434,28 @@ class VideoDuplicateFinder:
         for i in range(0, len(video_files), batch_size):
             batch = video_files[i:i + batch_size]
             with ThreadPoolExecutor(max_workers=self.workers) as executor:
-                futures = {executor.submit(self.process_video, file): file for file in batch}
+                futures: set = set()
                 with tqdm(total=len(batch)) as pbar:
-                    for future in as_completed(futures):
-                        try:
-                            future.result()
-                        except Exception as e:
-                            self.log("ERROR", f"Error processing video: {e}")
-                        pbar.update(1)
+                    for file in batch:
+                        # Limit concurrent futures to the max workers
+                        if len(futures) >= self.workers:
+                            done, _ = concurrent.futures.wait(
+                                futures, return_when=concurrent.futures.FIRST_COMPLETED
+                            )
+                            futures.difference_update(done)  # Safe removal
+
+                        futures.add(executor.submit(self.process_video, file))
+
+                    # Ensure all remaining futures complete before exiting
+                    if futures:
+                        for future in concurrent.futures.as_completed(futures):
+                            try:
+                                future.result()
+                                pbar.update(1)  # Update only on success
+                            except Exception as e:
+                                self.log("ERROR", f"Error processing video: {e}")
+
+            executor.shutdown(wait=True)  # Ensure all tasks finish before exit
 
         self.log("INFO", "Scan completed.")
         self.save_scan_state()
