@@ -2,6 +2,7 @@ import logging
 import sys
 from typing import Dict
 
+from tqdm import tqdm
 
 class ColoredFormatter(logging.Formatter):
     """Custom Formatter to add colors to log levels for CLI output.
@@ -79,11 +80,14 @@ class ColoredLogger:
         self.logger.setLevel(level)
 
     def log(self, level: str, message: str) -> str:
-        """Logs a message at the specified level.
+        """Logs a message at the specified level using tqdm.write().
 
         Args:
             level (str): The log level as a string (e.g., "DEBUG", "INFO").
             message (str): The message to log.
+
+        Returns:
+            str: The formatted log message.
         """
         level_map = {
             "DEBUG": logging.DEBUG,
@@ -93,30 +97,39 @@ class ColoredLogger:
             "CRITICAL": logging.CRITICAL
         }
 
-        if level.upper() not in level_map:
-            self.logger.warning(f"Invalid log level: {level}. Defaulting to INFO.")
+        level = level.upper()
+        if level not in level_map:
+            tqdm.write(f"\033[93m[WARNING] Invalid log level: {level}. Defaulting to INFO.\033[0m")
+            log_level = logging.INFO
+        else:
+            log_level = level_map[level]
 
-        log_level = level_map.get(level.upper(), logging.INFO)
-        formatted_message = f"[{level.upper()}] {message}"
+        formatted_message = f"[{level}] {message}"
+        tqdm.write(formatted_message)  # ✅ Ensures log messages don't interfere with progress bars
         self.logger.log(log_level, message)
         return formatted_message
 
     def debug(self, message: str) -> None:
         """Logs a debug message."""
+        tqdm.write(f"\033[94m[DEBUG]\033[0m {message}")  # Blue
         self.logger.debug(message)
 
     def info(self, message: str) -> None:
         """Logs an info message."""
+        tqdm.write(f"\033[92m[INFO]\033[0m {message}")  # Green
         self.logger.info(message)
 
     def warning(self, message: str) -> None:
         """Logs a warning message."""
+        tqdm.write(f"\033[93m[WARNING]\033[0m {message}")  # Yellow
         self.logger.warning(message)
 
     def error(self, message: str) -> None:
         """Logs an error message."""
+        tqdm.write(f"\033[91m[ERROR]\033[0m {message}")  # Red
         self.logger.error(message)
 
     def critical(self, message: str) -> None:
         """Logs a critical message."""
+        tqdm.write(f"\033[95m[CRITICAL]\033[0m {message}")  # Magenta
         self.logger.critical(message)

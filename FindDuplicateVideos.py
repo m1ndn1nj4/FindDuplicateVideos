@@ -1,15 +1,17 @@
+import hashlib
 import json
+import logging
 import multiprocessing
 import os
+import shutil
 import subprocess
 import threading
 import time
-import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-import xxhash
+import audioread
 from PIL import Image
 from imagehash import phash
 from tqdm import tqdm
@@ -103,7 +105,27 @@ class VideoDuplicateFinder:
         except ValueError:
             return 60
 
-    def normalize_video(self, file_path: str) -> Optional[str]:
+    def copy_file_to_local(self, source_path: Union[str, Path]) -> Optional[Path]:
+        """Copies a file to the local /tmp directory.
+
+        Args:
+            source_path (Union[str, Path]): The path to the source video file.
+
+        Returns:
+            Optional[Path]: The path to the copied file in /tmp, or None if the copy failed.
+        """
+        source_path = Path(source_path)
+        destination_path = self.tmp_dir / source_path.name
+
+        try:
+            shutil.copy2(source_path, destination_path)
+            self.log("INFO", f"Copied {source_path} to {destination_path}")
+            return destination_path
+        except Exception as e:
+            self.log("ERROR", f"Failed to copy {source_path} to {destination_path}: {e}")
+            return None
+
+    def normalize_video(self, file_path: Union[Path, str]) -> Optional[str]:
         """Normalizes a video file by resizing it to 320x180 and encoding it in H.264.
 
         Args:
@@ -180,6 +202,25 @@ class VideoDuplicateFinder:
             self.log("ERROR", f"Error extracting audio from {file_path}: {e}")
             return None
 
+    def get_audio_hash(self, audio_path: str) -> str:
+        """Computes SHA256 hash from audio file using audioread.
+
+        Args:
+            audio_path (str): Path to the audio file.
+
+        Returns:
+            str: The computed SHA256 hash of the audio fingerprint.
+        """
+        hasher = hashlib.sha256()
+        try:
+            with audioread.audio_open(audio_path) as f:
+                for buf in f:
+                    hasher.update(buf)
+            return hasher.hexdigest()
+        except Exception as e:
+            self.log("ERROR", f"Failed to compute audio hash: {e}")
+            return ""
+
     def extract_image(self, video_path: str) -> Optional[str]:
         """Extracts a single frame from a video and saves it as an image."""
         image_path: str = os.path.join(self.tmp_dir, f"{Path(video_path).stem}.jpg")
@@ -213,16 +254,16 @@ class VideoDuplicateFinder:
             return None
 
     @staticmethod
-    def get_hash(file_path: Union[str, Path]) -> str:
-        """Computes a hash for a given file.
+    def get_sha256_hash(file_path: str) -> str:
+        """Computes a SHA256 hash for a given file.
 
         Args:
-            file_path (Union[str, Path]): Path to the file.
+            file_path (str): Path to the file.
 
         Returns:
-            str: The computed hash.
+            str: The computed SHA256 hash.
         """
-        hasher = xxhash.xxh64()
+        hasher = hashlib.sha256()
         with open(file_path, "rb") as f:
             while chunk := f.read(4096):
                 hasher.update(chunk)
@@ -241,33 +282,52 @@ class VideoDuplicateFinder:
         return str(phash(Image.open(image_path)))
 
     def process_video(self, file_path: Union[Path, str]) -> None:
-        """Processes a video file by normalizing it, extracting audio, and computing hashes.
+        """Processes a video file by copying, normalizing, hashing, and extracting keyframes.
 
         Args:
-            file_path Union[Path, str]: Path to the video file.
+            file_path (Union[Path, str]): Path to the video file.
         """
         if str(file_path).lower() in self.processed_files:
             return
 
         try:
-            normalized_video: Optional[str] = self.normalize_video(file_path)
+            # Step 1: Copy video to /tmp
+            local_video_path = self.copy_file_to_local(file_path)
+            if not local_video_path:
+                self.log("ERROR", f"Failed to copy video to /tmp: {file_path}")
+                return
+
+            # Step 2: Normalize the copied video
+            normalized_video = self.normalize_video(local_video_path)
             if not normalized_video:
                 return
 
-            audio_file: Optional[str] = self.extract_audio(normalized_video)
-            audio_hash: Optional[str] = self.get_hash(audio_file) if audio_file else None
-            image_file: Optional[str] = self.extract_image(normalized_video)
-            image_hash: Optional[str] = self.get_image_hash(image_file) if image_file else None
-            video_hash: Optional[str] = self.get_hash(normalized_video)
+            # Step 3: Compute SHA256 hash for normalized video
+            video_hash = self.get_sha256_hash(normalized_video)
 
+            # Step 4: Extract normalized audio from normalized video
+            normalized_audio = self.extract_audio(normalized_video)
+            if not normalized_audio:
+                return
+
+            # Step 5: Compute SHA256 audio fingerprint hash
+            audio_hash = self.get_audio_hash(normalized_audio)
+
+            # Step 6: Generate perceptual hash for keyframes
+            image_file = self.extract_image(normalized_video)
+            image_hash = self.get_image_hash(image_file) if image_file else None
+
+            # Store hashes in scan state
             self.processed_files[str(file_path).lower()] = {
+                "video_hash": video_hash if video_hash else "",
                 "audio_hash": audio_hash if audio_hash else "",
-                "image_hash": image_hash if image_hash else "",
-                "video_hash": video_hash if video_hash else ""
+                "image_hash": image_hash if image_hash else ""
             }
             self.save_scan_state()
 
-            self.cleanup_tmp_files([normalized_video, audio_file, image_file])
+            # Cleanup temporary files
+            self.cleanup_tmp_files([local_video_path, normalized_video, normalized_audio, image_file])
+
         except Exception as e:
             self.log("ERROR", f"Error processing {file_path}: {e}")
 
