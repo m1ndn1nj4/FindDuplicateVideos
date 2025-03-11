@@ -11,7 +11,7 @@ from PIL import Image
 from imagehash import phash
 from tqdm import tqdm
 
-from src.logger import ColoredLogger as Log
+from src.logger import ColoredLogger
 
 SCAN_STATE_FILE = "scan_state.json"
 
@@ -31,7 +31,7 @@ class VideoDuplicateFinder:
 
     def log(self, message):
         if self.verbose:
-            Log.critical(f"[LOG] {message}")
+            ColoredLogger.critical(f"[LOG] {message}")
 
     def load_scan_state(self):
         if self.scan_state_file.exists():
