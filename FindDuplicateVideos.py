@@ -35,8 +35,8 @@ SCAN_STATE_FILE = "scan_state.json"
 
 class VideoDuplicateFinder:
     def __init__(
-        self, scan_dir: str, scan_state: str, duplicates_file: str,
-        workers: Optional[int] = None, verbose: bool = True
+            self, scan_dir: str, scan_state: str, duplicates_file: str,
+            workers: Optional[int] = None, verbose: bool = True
     ) -> None:
         """Initializes the VideoDuplicateFinder class.
 
@@ -145,14 +145,7 @@ class VideoDuplicateFinder:
         return f"{base64_name}{extension}"
 
     def copy_file_to_local(self, source_path: Union[str, Path]) -> Optional[Path]:
-        """Copies a file to the local /tmp directory.
-
-        Args:
-            source_path (Union[str, Path]): The path to the source video file.
-
-        Returns:
-            Optional[Path]: The path to the copied file in /tmp, or None if the copy failed.
-        """
+        """Copies a file to the local /tmp directory."""
         source_path = Path(source_path)
         destination_path = self.tmp_dir / source_path.name
 
@@ -163,6 +156,11 @@ class VideoDuplicateFinder:
         try:
             shutil.copy2(source_path, destination_path)
             self.log("INFO", f"Copied {source_path} to {destination_path}")
+
+            # ✅ Ensure the file is fully written before continuing
+            while not destination_path.exists():
+                time.sleep(1)  # Give it a second to complete
+
             return destination_path
         except Exception as e:
             self.log("ERROR", f"Failed to copy {source_path} to {destination_path}: {e}")
@@ -265,22 +263,26 @@ class VideoDuplicateFinder:
             return ""
 
     def run_ffmpeg(self, command: List[str], output_file: str) -> Optional[str]:
-        """Executes an FFmpeg command and returns output file path if successful, else None."""
+        """Executes an FFmpeg command and returns the output file path if successful."""
+        self.log("DEBUG", f"Running FFmpeg command: {' '.join(command)}")
+
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         last_size: int = 0
         last_update_time: float = time.time()
 
         while process.poll() is None:
             time.sleep(10)
+
             if os.path.exists(output_file):
                 current_size: int = os.path.getsize(output_file)
+                self.log("DEBUG", f"FFmpeg output file size: {current_size} bytes")
+
                 if current_size > last_size:
                     last_size = current_size
                     last_update_time = time.time()
-                elif time.time() - last_update_time > 300:
-                    self.log("ERROR", f"Process stalled. Killing FFmpeg and removing {output_file}.")
+                elif time.time() - last_update_time > 60:  # Reduce timeout for debugging
+                    self.log("ERROR", f"FFmpeg process stalled. Killing it.")
                     process.kill()
-                    os.remove(output_file) if os.path.exists(output_file) else None
                     return None
 
         if process.returncode == 0 and os.path.exists(output_file):
@@ -391,8 +393,13 @@ class VideoDuplicateFinder:
         try:
             # ✅ Step 1: Copy video to /tmp
             local_video_path = self.copy_file_to_local(file_path)
-            if not local_video_path:
+            if not local_video_path or not local_video_path.exists():
                 self.log("ERROR", f"Failed to copy video to /tmp: {file_path}")
+                return
+
+            # ✅ Ensure the file is large enough (non-empty)
+            if local_video_path.stat().st_size == 0:
+                self.log("ERROR", f"Copied file is empty: {local_video_path}")
                 return
 
             # ✅ Step 2: Normalize the copied video

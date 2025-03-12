@@ -1,6 +1,6 @@
 import logging
 import sys
-from typing import Dict
+from typing import Dict, Union
 
 from tqdm import tqdm
 
@@ -79,11 +79,11 @@ class ColoredLogger:
         self._log_level = level
         self.logger.setLevel(level)
 
-    def log(self, level: str, message: str) -> str:
+    def log(self, level: Union[str, int], message: str) -> str:
         """Logs a message at the specified level using tqdm.write().
 
         Args:
-            level (str): The log level as a string (e.g., "DEBUG", "INFO").
+            level (Union[str, int]): The log level as a string (e.g., "DEBUG", "INFO") or an integer.
             message (str): The message to log.
 
         Returns:
@@ -97,7 +97,14 @@ class ColoredLogger:
             "CRITICAL": logging.CRITICAL
         }
 
-        level = level.upper()
+        # Convert integer levels back to their string representation
+        if isinstance(level, int):
+            level = next((k for k, v in level_map.items() if v == level), "INFO")
+        elif isinstance(level, str):
+            level = level.upper()
+        else:
+            level = "INFO"
+
         if level not in level_map:
             tqdm.write(f"\033[93m[WARNING] Invalid log level: {level}. Defaulting to INFO.\033[0m")
             log_level = logging.INFO
@@ -106,7 +113,7 @@ class ColoredLogger:
 
         formatted_message = f"[{level}] {message}"
         tqdm.write(formatted_message)  # ✅ Ensures log messages don't interfere with progress bars
-        self.logger.log(log_level, message)
+        # self.logger.log(log_level, message)
         return formatted_message
 
     def debug(self, message: str) -> None:
